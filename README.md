@@ -131,3 +131,7 @@ pytest tests
 ```
 
 The test data in `tests/data/` is synthetic.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
