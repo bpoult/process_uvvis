@@ -650,109 +650,672 @@ def _jsonable(a):
     return [None if not np.isfinite(v) else float(f"{v:.6g}") for v in np.asarray(a, dtype=float)]
 
 
-def write_interactive_html(processed, path, title="UV-vis spectra", default_x="nm", saturation_abs=None):
+def _viewer_params(p: Processed, cfg: dict | None):
     """
-    Standalone HTML viewer (works offline, no Python needed): dropdowns switch the
-    x unit and the y quantity; clicking legend entries shows/hides spectra.
+    Starting values for the viewer's editable fields. Confirmed settings are used as-is.
+    When the concentration is unknown, masses/volume/solvent read from the name are
+    pre-filled (never a concentration, so epsilon only appears once the user adds the
+    molar mass).
     """
-    import plotly.graph_objects as go
+    guess = parse_name(p.name)
+    conc = dict((cfg or {}).get("concentration") or {})
+    if not conc and p.conc_M:
+        conc = {"conc_M": p.conc_M}
+    pathlength = p.pathlength_cm if cfg is not None else (p.pathlength_cm or guess["pathlength_cm"])
+    if not conc:
+        conc = {"solute_mass_mg": guess["solute_mass_mg"], "solvent_mass_g": guess["solvent_mass_g"],
+                "solution_volume_mL": guess["solution_volume_mL"], "solvent": guess["solvent"]}
+    solvent = conc.get("solvent") or (guess["solvent"] if conc.get("solvent_mass_g") else None)
+    rho = conc.get("solvent_density_g_mL") or (solvent_density(solvent) if solvent else None)
+    return {"l": pathlength, "mass": conc.get("solute_mass_mg"), "mw": conc.get("molar_mass_g_mol"),
+            "smass": conc.get("solvent_mass_g"), "solvent": solvent, "rho": rho,
+            "vol": conc.get("solution_volume_mL"), "conc": conc.get("conc_M")}
 
-    blanks = {}
-    for p in processed:
-        if p.blank_name and p.blank_name not in blanks:
-            blanks[p.blank_name] = p
-    have_eps = [p.epsilon is not None for p in processed]
-    ymodes = [("abs", "Absorbance (solvent-subtracted)")]
-    if any(have_eps):
-        ymodes.append(("epsilon", "ε (M⁻¹ cm⁻¹)"))
-    ymodes += [("norm", "Normalized absorbance"), ("raw", "Raw absorbance (before subtraction)")]
-    default_y = "epsilon" if all(have_eps) else "abs"
 
-    # Traces: every sample (reliable points) + its flagged points (grey, toggled with the sample
-    # through a legend group), then blanks (only drawn in the raw view).
-    traces = []
-    for p in processed:
-        traces.append((p.name, p, "sample"))
-        if p.flagged.any():
-            traces.append((p.name, p, "flagged"))
-    traces += [(f"Blank: {b}", p, "blank") for b, p in blanks.items()]
+def write_interactive_html(processed, path, title="UV-vis spectra", default_x="nm", saturation_abs=None,
+                           samples=None, source=None):
+    """
+    Standalone HTML viewer (works offline, no Python needed). Dropdowns switch the x unit
+    and the y quantity; a table lets the user edit pathlength / masses / molar mass /
+    concentration (epsilon updates live); legend clicks or checkboxes show/hide spectra;
+    a button saves a PNG/SVG snapshot (into the figures folder in Chrome/Edge).
 
-    def y_for(p, role, mode):
-        if role == "blank":
-            return p.abs_blank if mode == "raw" else np.full_like(p.x_nm, np.nan)
-        y = _y_data(p, mode)
-        if y is None:
-            return np.full_like(p.x_nm, np.nan)
-        if role == "flagged":
-            grown = p.flagged | np.r_[p.flagged[1:], False] | np.r_[False, p.flagged[:-1]]
-            return np.where(grown, y, np.nan)
-        return y if mode == "raw" else np.where(p.flagged, np.nan, y)
+    ``samples`` is the list of sample settings (as in processing_config.json) used to
+    pre-fill the editable fields.
+    """
+    import html
+    from datetime import datetime
+    from plotly.offline import get_plotlyjs
 
-    xs = {u: [_jsonable(convert_x(p.x_nm, u)) for _, p, _ in traces] for u in X_UNITS}
-    ys = {m: [_jsonable(y_for(p, role, m)) for _, p, role in traces] for m, _ in ymodes}
-
-    fig = go.Figure()
-    color_of, flag_legend_shown = {}, False
-    for i, (name, p, role) in enumerate(traces):
-        if role == "flagged":
-            fig.add_trace(go.Scatter(
-                x=xs[default_x][i], y=ys[default_y][i], name=f"raw A > {saturation_abs:g} (less reliable)",
-                legendgroup=name, showlegend=not flag_legend_shown, mode="lines",
-                line=dict(color="gray", width=2, dash="dot"),
-                hovertemplate="%{x:.4g}, %{y:.4g}<extra>" + name + " (less reliable)</extra>"))
-            flag_legend_shown = True
-            continue
-        color_of[name] = COLORS[len(color_of) % 8]
-        fig.add_trace(go.Scatter(
-            x=xs[default_x][i], y=ys[default_y][i], name=name, legendgroup=name, mode="lines",
-            line=dict(color=color_of[name], width=2, dash="dash" if role == "blank" else "solid"),
-            hovertemplate="%{x:.4g}, %{y:.4g}<extra>" + name + "</extra>"))
-
-    ylabels = dict(ymodes)
-    x_buttons = [dict(label=X_LABELS_HTML[u], method="update",
-                      args=[{"x": xs[u]}, {"xaxis.title.text": X_LABELS_HTML[u], "xaxis.autorange": True}])
-                 for u in X_UNITS]
-    y_buttons = [dict(label=lab, method="update",
-                      args=[{"y": ys[m]}, {"yaxis.title.text": lab, "yaxis.autorange": True}])
-                 for m, lab in ymodes]
-    notes = ["Click a legend entry to hide/show a spectrum, double-click to show only that one.",
-             "Drag to zoom, double-click the plot to reset. Camera icon (top right) saves a PNG."]
-    if not all(have_eps) and any(have_eps):
-        notes.append("Spectra without a known concentration are empty in the ε view.")
-    if saturation_abs is not None and any(p.flagged.any() for p in processed):
-        notes.append(f"Grey dotted: raw absorbance above {saturation_abs:g}, near detector saturation, "
-                     "so less reliable.")
-    notes.append("Blanks (dashed) only appear in the raw-absorbance view.")
-
-    menu = dict(direction="down", showactive=True, xanchor="left", yanchor="middle", y=1.1,
-                bgcolor="white", bordercolor="lightgray")
-    fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center", y=0.97, yref="container"),
-        template="simple_white",
-        xaxis=dict(title=X_LABELS_HTML[default_x], showgrid=True, gridcolor="rgba(0,0,0,0.08)"),
-        yaxis=dict(title=ylabels[default_y], showgrid=True, gridcolor="rgba(0,0,0,0.08)",
-                   zeroline=True, zerolinecolor="rgba(0,0,0,0.3)"),
-        updatemenus=[
-            dict(menu, buttons=x_buttons, active=X_UNITS.index(default_x), x=0.07),
-            dict(menu, buttons=y_buttons, active=[m for m, _ in ymodes].index(default_y), x=0.42),
-        ],
-        annotations=[
-            dict(text="<b>X axis:</b>", x=0.0, y=1.1, xref="paper", yref="paper", showarrow=False,
-                 xanchor="left", yanchor="middle"),
-            dict(text="<b>Y axis:</b>", x=0.35, y=1.1, xref="paper", yref="paper", showarrow=False,
-                 xanchor="left", yanchor="middle"),
-            dict(text="<br>".join(notes), x=0, y=-0.2, xref="paper", yref="paper", showarrow=False,
-                 xanchor="left", yanchor="top", align="left", font=dict(size=11, color="gray")),
-        ],
-        legend=dict(bgcolor="rgba(255,255,255,0.8)", bordercolor="lightgray", borderwidth=1),
-        margin=dict(t=140, b=170),
-        height=700,
-    )
     path = Path(path)
-    fig.write_html(path, include_plotlyjs=True, full_html=True,
-                   config={"displaylogo": False, "responsive": True,
-                           "toImageButtonOptions": {"format": "png", "scale": 3}})
+    by_name = {s["name"]: s for s in (samples or [])}
+    data = {
+        "id": f"{path.name}|{datetime.now().isoformat(timespec='seconds')}",
+        "title": title,
+        "stem": path.stem.removesuffix("_interactive"),
+        "source": source,
+        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "default_x": default_x,
+        "saturation_abs": saturation_abs,
+        "colors": COLORS,
+        "solvents": {k: v[0] for k, v in SOLVENTS.items()},
+        "spectra": [{
+            "name": p.name,
+            "blank": p.blank_name,
+            "x": _jsonable(p.x_nm),
+            "raw": _jsonable(p.abs_raw),
+            "blank_abs": _jsonable(p.abs_blank) if p.blank_name else None,
+            "corr": _jsonable(p.abs_corr),
+            "flag": p.flagged.astype(int).tolist(),
+            "params": _viewer_params(p, by_name.get(p.name) if samples is not None else None),
+        } for p in processed],
+    }
+    payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
+    flagged_note = ""
+    if saturation_abs is not None and any(p.flagged.any() for p in processed):
+        flagged_note = (f"<li>Grey dotted sections: raw absorbance above {saturation_abs:g}, close to detector "
+                        "saturation, so less reliable (true values there are probably higher).</li>")
+    parts = {
+        "__TITLE__": html.escape(title),
+        "__SOURCE__": html.escape(f"{source} · " if source else ""),
+        "__CREATED__": data["created"],
+        "__FLAGGED_NOTE__": flagged_note,
+        "__PLOTLYJS__": get_plotlyjs(),
+        "__DATA__": payload,
+        "__APPJS__": _VIEWER_JS,
+    }
+    # single pass, so text inside the inserted parts is never treated as a placeholder
+    page = re.sub("|".join(parts), lambda m: parts[m.group(0)], _VIEWER_TEMPLATE)
+    path.write_text(page, encoding="utf-8")
     return path
+
+
+_VIEWER_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ – UV-vis viewer</title>
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; margin: 0; color: #111; background: #f6f7f9; }
+  main { max-width: 1250px; margin: 0 auto; padding: 16px 24px 40px; }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 12px; }
+  .card { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin-bottom: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+  label.inline { font-weight: bold; font-size: 14px; }
+  select, input, button { font: inherit; font-size: 14px; }
+  select { padding: 4px 6px; margin-left: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; font-weight: bold; padding: 4px 6px; border-bottom: 2px solid #ccc; vertical-align: bottom; }
+  th small { font-weight: normal; color: #666; }
+  td { padding: 4px 6px; border-bottom: 1px solid #eee; vertical-align: middle; }
+  td input[type=text] { width: 6.5em; padding: 3px 4px; border: 1px solid #bbb; border-radius: 4px; }
+  td input.solvent { width: 6em; }
+  td input:focus { outline: 2px solid #56B4E9; border-color: #56B4E9; }
+  td.name { font-weight: bold; max-width: 260px; word-break: break-all; }
+  td.name small { display: block; font-weight: normal; color: #666; }
+  .swatch { display: inline-block; width: 14px; height: 4px; margin-right: 6px; vertical-align: middle; }
+  td.conc { font-family: Consolas, monospace; white-space: nowrap; }
+  td.conc .why { font-family: Arial, sans-serif; color: #b35c00; font-size: 12px; white-space: normal; }
+  .hint { color: #555; font-size: 12px; margin-top: 8px; line-height: 1.5; }
+  #plot { width: 100%; height: 620px; }
+  #plotnote { color: #b35c00; font-size: 13px; min-height: 1em; margin-top: 4px; }
+  button { padding: 6px 12px; border-radius: 5px; border: 1px solid #888; background: #fff; cursor: pointer; }
+  button.primary { background: #0072B2; color: white; border-color: #0072B2; font-weight: bold; }
+  button:hover { filter: brightness(0.95); }
+  #fname { width: 22em; padding: 5px; }
+  #savestatus { font-size: 13px; color: #333; }
+  #savestatus.err { color: #b00020; }
+  #dirlabel { font-size: 13px; color: #555; }
+  ul.notes { margin: 0; padding-left: 18px; color: #555; font-size: 13px; line-height: 1.6; }
+</style>
+<script>__PLOTLYJS__</script>
+</head>
+<body>
+<main>
+  <h1>__TITLE__</h1>
+  <div class="sub">__SOURCE__processed __CREATED__ with process-uvvis</div>
+
+  <div class="card row">
+    <label class="inline">X axis
+      <select id="xunit">
+        <option value="nm">Wavelength (nm)</option>
+        <option value="eV">Energy (eV)</option>
+        <option value="cm-1">Wavenumber (cm⁻¹)</option>
+      </select></label>
+    <label class="inline">Y axis
+      <select id="ymode">
+        <option value="abs">Absorbance (solvent-subtracted)</option>
+        <option value="epsilon">ε, molar absorptivity (M⁻¹ cm⁻¹)</option>
+        <option value="norm">Normalized absorbance</option>
+        <option value="raw">Raw absorbance + blank</option>
+      </select></label>
+  </div>
+
+  <div class="card">
+    <table id="tbl">
+      <thead><tr>
+        <th>Show</th><th>Spectrum</th>
+        <th>Pathlength<br><small>cm</small></th>
+        <th>Solute mass<br><small>mg</small></th>
+        <th>Molar mass<br><small>g/mol</small></th>
+        <th>Solvent mass<br><small>g</small></th>
+        <th>Solvent</th>
+        <th>Density<br><small>g/mL</small></th>
+        <th>Volume<br><small>mL (optional)</small></th>
+        <th>Concentration<br><small>M (overrides masses)</small></th>
+        <th>c used</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="hint">
+      c = (solute mass / molar mass) / volume. If no volume is entered, volume ≈ solvent mass / density
+      (fine for dilute solutions). Typing a solvent name fills in its density. A number in
+      <b>Concentration</b> is used as-is and overrides the masses. ε = A / (c · pathlength).<br>
+      Values typed here only change this viewer and the snapshots you save. The .txt files and the notebook
+      keep the values they were made with (edit the notebook's Settings cell to change those).
+      <button id="reset" style="margin-left:8px;padding:2px 8px;font-size:12px">Reset to original values</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="plot"></div>
+    <div id="plotnote"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label class="inline">File name <input id="fname" type="text"></label>
+      <select id="fmt" title="Image format"><option value="png">PNG (high-res)</option><option value="svg">SVG (vector)</option></select>
+      <button id="save" class="primary">Save snapshot to figures folder</button>
+      <button id="changedir">Choose folder…</button>
+      <span id="dirlabel"></span>
+    </div>
+    <div id="savestatus" style="margin-top:8px"></div>
+    <div id="figdir" class="hint" style="display:none">Figures folder:
+      <code id="figdirpath"></code> <button id="copydir" style="padding:1px 8px;font-size:12px">Copy path</button></div>
+    <div class="hint">Saves the plot exactly as shown (units, zoom, visible spectra). In <b>Chrome or Edge</b>, the first
+      time you save, a folder window opens. Browsers can't open it at this file's location, so the path of the
+      <b>figures</b> folder is copied for you: paste it into the window's address bar (Ctrl+V, Enter) and click
+      <i>Select Folder</i>. The browser remembers the folder for this file. Saving never overwrites: an existing name
+      gets _2, _3, … A small <i>_info.txt</i> with the values used is saved alongside. Other browsers save to your
+      Downloads folder.</div>
+  </div>
+
+  <div class="card">
+    <ul class="notes">
+      <li>Click a legend entry (or a Show box) to hide/show a spectrum; double-click a legend entry to show only that one.</li>
+      <li>Drag to zoom, double-click the plot to reset. Hover to read values.</li>
+      __FLAGGED_NOTE__
+      <li>Points where the solvent blank absorbs too strongly (below the solvent cutoff) were removed.</li>
+    </ul>
+  </div>
+</main>
+<script type="application/json" id="uv-data">__DATA__</script>
+<script>__APPJS__</script>
+</body>
+</html>
+"""
+
+_VIEWER_JS = r"""
+(function () {
+'use strict';
+const D = JSON.parse(document.getElementById('uv-data').textContent);
+const HC = 1239.84198;
+const CONV = { 'nm': x => x, 'eV': x => HC / x, 'cm-1': x => 1e7 / x };
+const XLAB = { 'nm': 'Wavelength (nm)', 'eV': 'Energy (eV)', 'cm-1': 'Wavenumber (cm<sup>−1</sup>)' };
+const FIELDS = ['l', 'mass', 'mw', 'smass', 'solvent', 'rho', 'vol', 'conc'];
+const NUMERIC = ['l', 'mass', 'mw', 'smass', 'rho', 'vol', 'conc'];
+const STORE = 'process-uvvis:' + D.id;
+const $ = id => document.getElementById(id);
+const gd = $('plot');
+const pos = v => { const x = parseFloat(String(v).replace(',', '.')); return isFinite(x) && x > 0 ? x : NaN; };
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const solventKey = {};
+Object.keys(D.solvents).forEach(k => { solventKey[k.toLowerCase()] = k; });
+
+// ---------- state (persisted per build in localStorage) ----------
+function initialState() {
+  const s = { x: D.default_x, y: null, samples: {} };
+  D.spectra.forEach(sp => {
+    const p = { show: true };
+    FIELDS.forEach(f => { const v = sp.params[f]; p[f] = (v === null || v === undefined) ? '' : String(v); });
+    s.samples[sp.name] = p;
+  });
+  return s;
+}
+function loadState() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE));
+    if (s && s.samples && D.spectra.every(sp => s.samples[sp.name])) return s;
+  } catch (e) { /* ignore */ }
+  return null;
+}
+function saveState() { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) { /* ignore */ } }
+let state = loadState() || initialState();
+
+// ---------- physics ----------
+function concOf(p) {
+  const c = pos(p.conc);
+  if (c) return { c: c, how: 'entered directly' };
+  const m = pos(p.mass), mw = pos(p.mw);
+  if (!m && !mw) return { why: 'enter a concentration, or solute mass + molar mass' };
+  if (!m) return { why: 'enter the solute mass' };
+  if (!mw) return { why: 'enter the molar mass' };
+  let V = pos(p.vol), how;
+  if (V) {
+    how = `${m} mg ÷ ${mw} g/mol in ${V} mL`;
+  } else {
+    const sm = pos(p.smass), rho = pos(p.rho);
+    if (!(sm && rho)) return { why: 'enter a volume, or solvent mass + density' };
+    V = sm / rho;
+    how = `${m} mg ÷ ${mw} g/mol in ${sm} g ÷ ${rho} g/mL = ${V.toFixed(4)} mL`;
+  }
+  return { c: (m * 1e-3 / mw) / (V * 1e-3), how: how };
+}
+function epsilonReady(sp) {
+  const p = state.samples[sp.name];
+  return !!(concOf(p).c && pos(p.l));
+}
+function maxReliable(sp, arr) {
+  let mx = -Infinity;
+  arr.forEach((v, j) => { if (v !== null && !sp.flag[j] && v > mx) mx = v; });
+  return isFinite(mx) && mx > 0 ? mx : NaN;
+}
+function grow(flag) {
+  return flag.map((f, j) => !!(f || flag[j - 1] || flag[j + 1]));
+}
+function supNum(n) { return n === 0 ? '' : `10<sup>${n}</sup> `; }
+
+// ---------- table ----------
+function buildTable() {
+  const tb = document.querySelector('#tbl tbody');
+  tb.innerHTML = '';
+  D.spectra.forEach((sp, i) => {
+    const p = state.samples[sp.name];
+    const tr = document.createElement('tr');
+    tr.dataset.name = sp.name;
+    let h = `<td><input type="checkbox" data-f="show" ${p.show ? 'checked' : ''}></td>`;
+    h += `<td class="name"><span class="swatch" style="background:${D.colors[i % 8]}"></span>${esc(sp.name)}` +
+         `<small>${sp.blank ? 'blank subtracted: ' + esc(sp.blank) : 'no blank subtracted'}</small></td>`;
+    FIELDS.forEach(f => {
+      const cls = f === 'solvent' ? ' class="solvent" list="solvent-list"' : ' inputmode="decimal"';
+      h += `<td><input type="text" data-f="${f}"${cls} value="${esc(p[f])}"></td>`;
+    });
+    h += `<td class="conc"></td>`;
+    tr.innerHTML = h;
+    tb.appendChild(tr);
+  });
+  if (!$('solvent-list')) {
+    const dl = document.createElement('datalist');
+    dl.id = 'solvent-list';
+    dl.innerHTML = Object.keys(D.solvents).map(k => `<option value="${esc(k)}">`).join('');
+    document.body.appendChild(dl);
+  }
+  updateConcCells();
+}
+function updateConcCells() {
+  document.querySelectorAll('#tbl tbody tr').forEach(tr => {
+    const p = state.samples[tr.dataset.name];
+    const r = concOf(p);
+    const cell = tr.querySelector('td.conc');
+    if (r.c) {
+      cell.innerHTML = `${r.c.toExponential(3)} M`;
+      cell.title = r.how;
+      if (!pos(p.l)) cell.innerHTML += '<div class="why">enter the pathlength for ε</div>';
+    } else {
+      cell.innerHTML = `—<div class="why">${esc(r.why)}</div>`;
+      cell.title = '';
+    }
+  });
+}
+document.querySelector('#tbl tbody').addEventListener('input', ev => {
+  const inp = ev.target, tr = inp.closest('tr');
+  if (!tr || !inp.dataset.f) return;
+  const p = state.samples[tr.dataset.name], f = inp.dataset.f;
+  if (f === 'show') {
+    p.show = inp.checked;
+  } else {
+    p[f] = inp.value.trim();
+    if (f === 'solvent') {
+      const k = solventKey[p.solvent.toLowerCase()];
+      if (k) { p.rho = String(D.solvents[k]); tr.querySelector('input[data-f=rho]').value = p.rho; }
+    }
+  }
+  saveState();
+  updateConcCells();
+  render();
+});
+$('reset').addEventListener('click', () => {
+  const keep = { x: state.x, y: state.y };
+  state = initialState();
+  Object.assign(state, keep);
+  saveState();
+  buildTable();
+  render();
+});
+
+// ---------- plot ----------
+function render() {
+  const xu = state.x, ym = state.y;
+  const traces = [], note = [];
+  let scale = 1, flagLegend = false;
+
+  if (ym === 'epsilon') {
+    let mx = 0;
+    D.spectra.forEach(sp => {
+      const p = state.samples[sp.name];
+      if (!p.show || !epsilonReady(sp)) return;
+      const k = concOf(p).c * pos(p.l);
+      const m = maxReliable(sp, sp.corr.map(v => v === null ? null : Math.abs(v)));
+      if (m / k > mx) mx = m / k;
+    });
+    if (mx >= 1e4) scale = Math.pow(10, 3 * Math.floor(Math.log10(mx) / 3));
+    const missing = D.spectra.filter(sp => !epsilonReady(sp)).map(sp => sp.name);
+    if (missing.length) note.push('Not shown in the ε view (needs concentration and pathlength): ' + missing.join(', '));
+  }
+
+  D.spectra.forEach((sp, i) => {
+    const p = state.samples[sp.name];
+    const color = D.colors[i % 8];
+    const x = sp.x.map(v => CONV[xu](v));
+    let y;
+    if (ym === 'abs') y = sp.corr;
+    else if (ym === 'raw') y = sp.raw;
+    else if (ym === 'norm') { const m = maxReliable(sp, sp.corr); y = sp.corr.map(v => v === null ? null : v / m); }
+    else {
+      if (!epsilonReady(sp)) return;
+      const k = concOf(p).c * pos(p.l) * scale;
+      y = sp.corr.map(v => v === null ? null : v / k);
+    }
+    const visible = p.show ? true : 'legendonly';
+    const main = ym === 'raw' ? y : y.map((v, j) => sp.flag[j] ? null : v);
+    traces.push({
+      x: x, y: main, name: sp.name, legendgroup: sp.name, type: 'scatter', mode: 'lines',
+      line: { color: color, width: 2 }, visible: visible, meta: { sample: sp.name },
+      hovertemplate: '%{x:.4g}, %{y:.4g}<extra>' + esc(sp.name) + '</extra>'
+    });
+    if (ym !== 'raw' && sp.flag.some(f => f)) {
+      const g = grow(sp.flag);
+      traces.push({
+        x: x, y: y.map((v, j) => g[j] ? v : null), legendgroup: sp.name, type: 'scatter', mode: 'lines',
+        name: `raw A > ${D.saturation_abs} (less reliable)`, showlegend: !flagLegend && p.show,
+        line: { color: 'gray', width: 2, dash: 'dot' }, visible: visible, meta: { sample: sp.name },
+        hovertemplate: '%{x:.4g}, %{y:.4g}<extra>' + esc(sp.name) + ' (less reliable)</extra>'
+      });
+      if (p.show) flagLegend = true;
+    }
+  });
+  if (ym === 'raw') {
+    const seen = new Set();
+    D.spectra.forEach(sp => {
+      if (!sp.blank || seen.has(sp.blank)) return;
+      seen.add(sp.blank);
+      const anyShown = D.spectra.some(s => s.blank === sp.blank && state.samples[s.name].show);
+      traces.push({
+        x: sp.x.map(v => CONV[xu](v)), y: sp.blank_abs, name: 'Blank: ' + sp.blank, type: 'scatter', mode: 'lines',
+        line: { color: '#555', width: 1.5, dash: 'dash' }, visible: anyShown ? true : 'legendonly', meta: { blank: sp.blank },
+        hovertemplate: '%{x:.4g}, %{y:.4g}<extra>Blank: ' + esc(sp.blank) + '</extra>'
+      });
+    });
+  }
+
+  const ylab = {
+    abs: 'Absorbance', norm: 'Normalized absorbance', raw: 'Absorbance (raw)',
+    epsilon: `ε (${supNum(Math.round(Math.log10(scale)))}M<sup>−1</sup> cm<sup>−1</sup>)`
+  }[ym];
+  const axis = { showline: true, mirror: true, linecolor: 'black', linewidth: 1, ticks: 'outside',
+                 showgrid: true, gridcolor: 'rgba(0,0,0,0.1)', automargin: true };
+  const layout = {
+    title: { text: '<b>' + esc(D.title) + '</b>', x: 0.5, font: { size: 18 } },
+    font: { family: 'Arial, Helvetica, sans-serif', size: 14, color: '#000' },
+    paper_bgcolor: 'white', plot_bgcolor: 'white',
+    xaxis: Object.assign({ title: { text: '<b>' + XLAB[xu] + '</b>' }, zeroline: false }, axis),
+    yaxis: Object.assign({ title: { text: '<b>' + ylab + '</b>' }, zeroline: true,
+                           zerolinecolor: 'rgba(0,0,0,0.35)' }, axis),
+    legend: { bgcolor: 'rgba(255,255,255,0.9)', bordercolor: '#ccc', borderwidth: 1 },
+    margin: { l: 80, r: 20, t: 60, b: 70 },
+    uirevision: xu + '|' + ym,
+    hovermode: 'closest'
+  };
+  const config = { displaylogo: false, responsive: true,
+                   toImageButtonOptions: { format: 'png', scale: 3, filename: currentName() } };
+  Plotly.react(gd, traces, layout, config);
+  $('plotnote').textContent = note.join(' ');
+  if ($('fname').dataset.auto !== '0') $('fname').value = defaultName();
+}
+
+// legend clicks drive the same "show" state as the checkboxes
+function setShow(name, show) {
+  state.samples[name].show = show;
+  const tr = Array.from(document.querySelectorAll('#tbl tbody tr')).find(r => r.dataset.name === name);
+  if (tr) tr.querySelector('input[data-f=show]').checked = show;
+}
+function wireLegend() {
+  gd.on('plotly_legendclick', ev => {
+    const meta = ev.data[ev.curveNumber].meta || {};
+    if (!meta.sample) return true;  // blanks: default toggle
+    setShow(meta.sample, !state.samples[meta.sample].show);
+    saveState(); render();
+    return false;
+  });
+  gd.on('plotly_legenddoubleclick', ev => {
+    const meta = ev.data[ev.curveNumber].meta || {};
+    if (!meta.sample) return true;
+    const onlyThis = D.spectra.every(sp => state.samples[sp.name].show === (sp.name === meta.sample));
+    D.spectra.forEach(sp => setShow(sp.name, onlyThis ? true : sp.name === meta.sample));
+    saveState(); render();
+    return false;
+  });
+}
+
+// ---------- controls ----------
+if (!state.y) state.y = D.spectra.every(epsilonReady) ? 'epsilon' : 'abs';
+$('xunit').value = state.x;
+$('ymode').value = state.y;
+$('xunit').addEventListener('change', e => { state.x = e.target.value; saveState(); render(); });
+$('ymode').addEventListener('change', e => { state.y = e.target.value; saveState(); render(); });
+
+// ---------- snapshots ----------
+function safe(s) { return String(s).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^[ .]+|[ .]+$/g, ''); }
+function defaultName() { return safe(`${D.stem}_${state.y}_${state.x}`); }
+function currentName() { return safe($('fname').value) || defaultName(); }
+$('fname').addEventListener('input', () => { $('fname').dataset.auto = $('fname').value.trim() ? '0' : '1'; });
+function status(msg, err) { const s = $('savestatus'); s.textContent = msg; s.className = err ? 'err' : ''; }
+
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('process-uvvis', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbGet(k) {
+  try {
+    const db = await idb();
+    return await new Promise((res, rej) => {
+      const q = db.transaction('kv').objectStore('kv').get(k);
+      q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+    });
+  } catch (e) { return null; }
+}
+async function idbSet(k, v) {
+  try {
+    const db = await idb();
+    await new Promise((res, rej) => {
+      const t = db.transaction('kv', 'readwrite');
+      t.objectStore('kv').put(v, k);
+      t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+    });
+  } catch (e) { /* ignore */ }
+}
+const DIRKEY = 'dir:' + location.href.split('#')[0];
+const canPick = typeof window.showDirectoryPicker === 'function';
+
+// Browsers can't open the folder picker at this file's location, so we work out the path of the
+// figures folder next to this HTML file and put it on the clipboard for pasting into the picker.
+function figuresPath() {
+  if (location.protocol !== 'file:') return null;
+  let p = decodeURIComponent(location.pathname);
+  if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1).replace(/\//g, '\\');  // Windows: /C:/a/b -> C:\a\b
+  else if (location.host) p = '\\\\' + location.host + p.replace(/\//g, '\\');  // network share
+  const sep = p.includes('\\') ? '\\' : '/';
+  return p.slice(0, p.lastIndexOf(sep) + 1) + 'figures';
+}
+const FIGDIR = figuresPath();
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall back below */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) { return false; }
+}
+async function pickDir() {
+  if (FIGDIR) {
+    const copied = await copyText(FIGDIR);
+    status(copied
+      ? `The figures folder path is copied: ${FIGDIR}. In the folder window, click the address bar ` +
+        '(or press Alt+D), paste with Ctrl+V and press Enter, then click "Select Folder".'
+      : `Navigate to ${FIGDIR} in the folder window, then click "Select Folder".`);
+  } else {
+    status('Choose the "figures" folder next to this HTML file…');
+  }
+  let h = await window.showDirectoryPicker({ id: 'uvvis-figures', mode: 'readwrite' });
+  if (h.name !== 'figures') {
+    try { h = await h.getDirectoryHandle('figures'); } catch (e) { /* use the folder as chosen */ }
+  }
+  await idbSet(DIRKEY, h);
+  $('dirlabel').textContent = 'Saving to folder: ' + h.name +
+    (h.name === 'figures' ? '' : ' (not a "figures" folder; click Choose folder… to change)');
+  return h;
+}
+async function getDir() {
+  const h = await idbGet(DIRKEY);
+  if (h) {
+    try {
+      let perm = await h.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') perm = await h.requestPermission({ mode: 'readwrite' });
+      if (perm === 'granted') return h;
+    } catch (e) { /* fall through to a new pick */ }
+  }
+  return pickDir();
+}
+async function exists(dir, name) {
+  try { await dir.getFileHandle(name); return true; }
+  catch (e) { if (e.name === 'NotFoundError' || e.name === 'TypeError') return false; throw e; }
+}
+async function uniqueStem(dir, base, ext) {
+  // the image and its _info.txt must both be new, so a PNG and an SVG never share an info file
+  let stem = base, k = 2;
+  while (await exists(dir, `${stem}.${ext}`) || await exists(dir, `${stem}_info.txt`)) stem = `${base}_${k++}`;
+  return stem;
+}
+function dataUrlToBlob(url) {
+  const i = url.indexOf(','), head = url.slice(0, i), body = url.slice(i + 1);
+  const mime = head.slice(5).split(';')[0];
+  if (head.includes(';base64')) {
+    const bin = atob(body), a = new Uint8Array(bin.length);
+    for (let j = 0; j < bin.length; j++) a[j] = bin.charCodeAt(j);
+    return new Blob([a], { type: mime });
+  }
+  return new Blob([decodeURIComponent(body)], { type: mime });
+}
+async function writeFile(dir, name, blob) {
+  const fh = await dir.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();
+  await w.write(blob);
+  await w.close();
+}
+function infoText(imageName) {
+  const xl = { 'nm': 'Wavelength (nm)', 'eV': 'Energy (eV)', 'cm-1': 'Wavenumber (cm-1)' }[state.x];
+  const yl = { abs: 'Absorbance (solvent-subtracted)', epsilon: 'epsilon (M-1 cm-1)',
+               norm: 'Normalized absorbance', raw: 'Raw absorbance' }[state.y];
+  const lines = [`Snapshot: ${imageName}`, `Saved: ${new Date().toLocaleString()}`,
+                 `From viewer: ${decodeURIComponent(location.pathname.split('/').pop())}`,
+                 `Source data: ${D.source || ''}`, `X axis: ${xl}`, `Y axis: ${yl}`, '', 'Spectra shown:'];
+  D.spectra.forEach(sp => {
+    const p = state.samples[sp.name];
+    if (!p.show) return;
+    const r = concOf(p);
+    lines.push(`- ${sp.name}`);
+    lines.push(`    blank subtracted: ${sp.blank || 'none'}`);
+    lines.push(`    pathlength (cm): ${p.l || 'unknown'}`);
+    if (p.mass) lines.push(`    solute mass (mg): ${p.mass}`);
+    if (p.mw) lines.push(`    molar mass (g/mol): ${p.mw}`);
+    if (p.smass) lines.push(`    solvent mass (g): ${p.smass}${p.solvent ? ' ' + p.solvent : ''}, density (g/mL): ${p.rho || '?'}`);
+    if (p.vol) lines.push(`    volume (mL): ${p.vol}`);
+    lines.push(`    concentration (M): ${r.c ? r.c.toExponential(4) + ' (' + r.how + ')' : 'unknown'}`);
+  });
+  return lines.join('\r\n') + '\r\n';
+}
+function snapshotFigure() {
+  // only what is visible (hidden spectra would otherwise appear as faded legend entries)
+  const data = gd.data.filter(t => t.visible === true || t.visible === undefined);
+  const layout = JSON.parse(JSON.stringify(gd.layout));
+  ['xaxis', 'yaxis'].forEach(a => { layout[a].autorange = false; layout[a].range = gd._fullLayout[a].range.slice(); });
+  return { data: data, layout: layout };
+}
+async function saveSnapshot(forcePick) {
+  const fmt = $('fmt').value, base = currentName();
+  const opts = { format: fmt, width: 1000, height: 620, scale: fmt === 'png' ? 3 : 1 };
+  if (!canPick) {
+    await Plotly.downloadImage(snapshotFigure(), Object.assign({ filename: base }, opts));
+    status(`Downloaded ${base}.${fmt} to your Downloads folder. (This browser can't save into a chosen folder; ` +
+           'use Chrome or Edge for that, or move the file into the figures folder.)');
+    return;
+  }
+  let dir;
+  try { dir = forcePick ? await pickDir() : await getDir(); }
+  catch (e) {
+    if (e.name === 'AbortError') { status('Cancelled, nothing saved.'); return; }
+    await Plotly.downloadImage(snapshotFigure(), Object.assign({ filename: base }, opts));
+    status(`Couldn't open a folder (${e.message}), so the image was downloaded to your Downloads folder instead.`, true);
+    return;
+  }
+  try {
+    status('Saving…');
+    const blob = dataUrlToBlob(await Plotly.toImage(snapshotFigure(), opts));
+    const stem = await uniqueStem(dir, base, fmt), name = `${stem}.${fmt}`;
+    await writeFile(dir, name, blob);
+    await writeFile(dir, `${stem}_info.txt`, new Blob([infoText(name)], { type: 'text/plain' }));
+    status(`Saved ${name} (+ _info.txt) to folder "${dir.name}".`);
+  } catch (e) {
+    status('Saving failed: ' + e.message, true);
+  }
+}
+$('save').addEventListener('click', () => saveSnapshot(false));
+$('changedir').addEventListener('click', async () => {
+  if (!canPick) { status('This browser saves to Downloads only; choosing a folder needs Chrome or Edge.'); return; }
+  try { await pickDir(); status('Folder set. Click "Save snapshot" to save.'); }
+  catch (e) { status(e.name === 'AbortError' ? 'Cancelled.' : 'Could not choose a folder: ' + e.message, e.name !== 'AbortError'); }
+});
+if (!canPick) {
+  $('save').textContent = 'Download snapshot';
+  $('changedir').style.display = 'none';
+  $('dirlabel').textContent = '(saves to your Downloads folder in this browser)';
+} else {
+  idbGet(DIRKEY).then(h => { if (h) $('dirlabel').textContent = 'Saving to folder: ' + h.name + ' (chosen earlier)'; });
+}
+if (FIGDIR) {
+  $('figdir').style.display = '';
+  $('figdirpath').textContent = FIGDIR;
+  $('copydir').addEventListener('click', async () => {
+    status(await copyText(FIGDIR) ? 'Copied: ' + FIGDIR : 'Could not copy; select the path above and copy it.');
+  });
+}
+
+// ---------- go ----------
+buildTable();
+Plotly.newPlot(gd, [], {}).then(() => { wireLegend(); render(); });
+window.uvviewer = { state: () => state, render: render, concOf: concOf, saveSnapshot: saveSnapshot };
+})();
+"""
 
 
 # --------------------------------------------------------------------------
@@ -985,10 +1548,15 @@ def make_notebook(cfg):
              "                        saturation_abs=SATURATION_ABS)\n"
              "    print('saved', path)"),
         md("## 10. Interactive viewer\n\n"
-           f"`{stem}_interactive.html` opens in any web browser and needs no Python. Dropdowns switch the x axis "
-           "(nm / eV / cm⁻¹) and the y quantity. Click legend entries to choose which spectra to overlay."),
+           f"`{stem}_interactive.html` opens in any web browser and needs no Python. In it you can:\n"
+           "- switch the x axis (nm / eV / cm⁻¹) and the y quantity\n"
+           "- choose which spectra to overlay\n"
+           "- edit the pathlength, masses, molar mass or concentration, with ε updating as you type\n"
+           "- save a PNG/SVG snapshot of the current view into `figures/`. Chrome/Edge save there directly; "
+           "other browsers save to Downloads."),
         code(f"html = uv.write_interactive_html(processed, '{stem}_interactive.html', title=DATA_FILE.stem,\n"
-             "                                 default_x=X_UNIT, saturation_abs=SATURATION_ABS)\n"
+             "                                 default_x=X_UNIT, saturation_abs=SATURATION_ABS,\n"
+             "                                 samples=SAMPLES, source=DATA_FILE.name)\n"
              "print('saved', html)"),
     ]
     nb = new_notebook(cells=cells)

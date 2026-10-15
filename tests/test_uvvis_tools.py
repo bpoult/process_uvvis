@@ -139,6 +139,13 @@ def test_build_end_to_end(tmp_path):
         "FeL_0.52mg_2.1g_MeCN_1cm.png", "CoL_10uM_MeCN_1cm.png", "NiL_2mg_5mL_DMF_1cm.png",
         "synthetic_cary_overlay.png"}
     html = Path(result["interactive_html"]).read_text(encoding="utf-8")
-    assert "updatemenus" in html and "Wavenumber" in html
+    assert "Wavenumber" in html and "Save snapshot" in html and 'id="uv-data"' in html
+    viewer = json.loads(html.split('<script type="application/json" id="uv-data">', 1)[1].split("</script>", 1)[0])
+    params = {s["name"]: s["params"] for s in viewer["spectra"]}
+    assert params["FeL_0.52mg_2.1g_MeCN_1cm"] == {
+        "l": 1.0, "mass": 0.52, "mw": 600, "smass": 2.1, "solvent": "MeCN", "rho": 0.786, "vol": None, "conc": None}
+    # unknown concentration: masses from the name are suggested, but never a concentration
+    assert params["CoL_10uM_MeCN_1cm"]["conc"] is None and params["CoL_10uM_MeCN_1cm"]["l"] == 1.0
+    assert params["NiL_2mg_5mL_DMF_1cm"]["conc"] == 2e-3
     assert (out / "synthetic_cary_processing.ipynb").exists()
     assert (out / "uvvis_tools.py").exists()

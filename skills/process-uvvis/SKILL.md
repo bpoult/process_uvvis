@@ -141,9 +141,16 @@ mismatch or a missing concentration field. Fix the config and re-run.
 - Tell the user what was made, with the folder layout:
   - `<name>.ipynb`: the step-by-step record. Open it in JupyterLab or VS Code and
     use *Run All* after editing the Settings cell.
-  - `<stem>_interactive.html`: double-click to open it in a browser. Dropdowns
-    switch nm/eV/cm⁻¹ and Abs/ε/normalized/raw, and clicking legend entries
-    shows or hides spectra. Works offline and can be emailed.
+  - `<stem>_interactive.html`: double-click to open it in a browser. Works
+    offline and can be emailed.
+    - Dropdowns switch nm/eV/cm⁻¹ and Abs/ε/normalized/raw, and clicking legend
+      entries shows or hides spectra.
+    - A table lets the user edit pathlength, masses, molar mass and
+      concentration, with ε updating live. This is handy if they didn't know
+      the molar mass yet.
+    - *Save snapshot* writes a PNG/SVG of the current view, plus an
+      `_info.txt` of the values used. In Chrome/Edge it saves into the
+      `figures/` folder (they pick it once); other browsers save to Downloads.
   - `processed_data/<spectrum name>.txt`: tab-separated, with a `#` header.
   - `figures/<spectrum name>.png` (+ `<stem>_overlay.png` if there are several
     samples).

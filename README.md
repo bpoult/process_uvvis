@@ -69,8 +69,23 @@ email it to collaborators.
 - **X axis** dropdown: wavelength (nm), energy (eV) or wavenumber (cm⁻¹)
 - **Y axis** dropdown: blank-subtracted absorbance, ε, normalized absorbance, or raw data with
   the blank
-- **Legend:** click a spectrum to hide or show it; double-click to show only that one
-- Drag to zoom, double-click to reset, camera icon to save a PNG
+- **Sample table:** edit the pathlength, solute mass, molar mass, solvent mass, solvent
+  (fills in the density), volume or concentration, and ε updates as you type. You can add a
+  molar mass you didn't know at processing time here. Your edits are remembered the next time
+  you open the file. *Reset to original values* undoes them. These edits only affect the viewer
+  and your snapshots; the `.txt` files and notebook keep the values they were made with.
+- **Show** boxes / legend: click a spectrum to hide or show it; double-click a legend entry to
+  show only that one
+- Drag to zoom, double-click to reset
+- **Save snapshot:** saves the plot as you see it (units, zoom, visible spectra) as a
+  high-res PNG or SVG, plus a small `_info.txt` listing the values used. It never overwrites an
+  existing file (it adds `_2`, `_3`, …).
+  - In **Chrome or Edge**, the first save asks you to pick a folder: choose the `figures` folder
+    next to the HTML file. Browsers can't open the folder window at the HTML file's location, so
+    the viewer copies the figures folder's path to your clipboard. Paste it into the folder
+    window's address bar (Ctrl+V, Enter) and click *Select Folder*. After that, each save is one
+    click.
+  - Firefox and Safari can't write into a chosen folder, so they save to Downloads instead.
 
 ### The processed .txt files
 
