@@ -1,0 +1,12 @@
+{
+  "name": "process-uvvis",
+  "owner": { "name": "bpoult" },
+  "description": "UV-vis spectroscopy processing skill for Claude Code",
+  "plugins": [
+    {
+      "name": "process-uvvis",
+      "source": "./",
+      "description": "Process raw UV-vis spectra into epsilon plots, processed data, a notebook and an interactive viewer."
+    }
+  ]
+}

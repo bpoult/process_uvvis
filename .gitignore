@@ -1,0 +1,9 @@
+# raw data and outputs stay local
+/*.csv
+/*.CSV
+*_processed/
+.nb_snapshots/
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.pytest_cache/

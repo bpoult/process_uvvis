@@ -1,0 +1,8 @@
+{
+  "name": "process-uvvis",
+  "version": "1.0.0",
+  "description": "Process raw UV-vis spectra: solvent subtraction, concentration and molar absorptivity, figures, a step-by-step Jupyter notebook and an interactive HTML viewer.",
+  "author": { "name": "bpoult" },
+  "repository": "https://github.com/bpoult/process_uvvis",
+  "keywords": ["uv-vis", "spectroscopy", "absorbance", "chemistry", "jupyter"]
+}
